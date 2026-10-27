@@ -140,6 +140,8 @@ public static partial class MessagePackSerializer
     /// <summary>
     /// Serializes <paramref name="value"/> straight into a write buffer without flushing, for embedding MessagePack inside another protocol.
     /// Options with a MessageProcessor are rejected, since the processor needs the complete message and this entry never sees it.
+    /// A value whose formatter only works over the Compatible buffers (one from a library built for netstandard only) is staged
+    /// in a Compatible buffer and copied into <paramref name="buffer"/>, like the other entry points reroute it.
     /// </summary>
     [RequiresDynamicCode(MessagePackFormatterFactory.RequiresDynamicCodeMessage)]
     [RequiresUnreferencedCode(MessagePackFormatterFactory.RequiresUnreferencedCodeMessage)]
@@ -159,7 +161,33 @@ public static partial class MessagePackSerializer
             ThrowMessageProcessorNotApplicable();
         }
         var state = new SerializeState(options.MaxDepth);
-        options.Resolver.GetFormatter<TWriteBuffer, ReadOnlySpanReadBuffer, T>().Serialize(ref buffer, ref state, value);
+        if (!options.Resolver.TryGetFormatter<TWriteBuffer, ReadOnlySpanReadBuffer, T>(out var formatter))
+        {
+            SerializeCompatible(ref buffer, value, options, ref state);
+            return;
+        }
+        formatter.Serialize(ref buffer, ref state, value);
+
+        // A formatter from a netstandard-built library only works over the Compatible buffers, which cannot hold the
+        // caller's buffer: stage through one and copy the bytes over, as ObjectFallbackFormatter does for a runtime type.
+        // A formatter that throws leaves the caller's buffer untouched, since the staging is discarded.
+        static void SerializeCompatible(ref TWriteBuffer buffer, T value, MessagePackSerializerOptions options, ref SerializeState state)
+        {
+            var staging = new CompatibleArrayPoolListWriteBuffer();
+            try
+            {
+                options.Resolver.GetFormatter<CompatibleArrayPoolListWriteBuffer, CompatibleReadOnlySpanReadBuffer, T>().Serialize(ref staging, ref state, value);
+                var segments = staging.GetWrittenSegments();
+                while (segments.TryGetNext(out var segment))
+                {
+                    buffer.Advance(MessagePackPrimitives.UnsafeWriteRaw(ref buffer.GetReference(segment.Length), segment));
+                }
+            }
+            finally
+            {
+                staging.Dispose();
+            }
+        }
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]

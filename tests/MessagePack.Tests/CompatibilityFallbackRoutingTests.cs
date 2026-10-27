@@ -169,5 +169,81 @@ public class CompatibilityFallbackRoutingTests
         Assert.Contains("net9.0", ex.Message);
         Assert.Empty(fallbackTypes);
     }
+
+    /// <summary>
+    /// Ensures that the ref TWriteBuffer entry point serializes a downlevel-only formatter's value by staging it through the
+    /// Compatible buffers, producing the same bytes as the byte[] entry point instead of throwing.
+    /// </summary>
+    [Fact]
+    public void RefBufferEntryRoutesToo()
+    {
+        var options = MakeOptions(out var fallbackTypes);
+        var value = new RoutedValue { X = 4242 };
+
+        var writer = new ArrayBufferWriter<byte>();
+        var buffer = new BufferWriterWriteBuffer(writer);
+        MessagePackSerializer.Serialize(ref buffer, value, options);
+        buffer.Flush();
+
+        Assert.Equal(MessagePackSerializer.Serialize(value, options), writer.WrittenSpan.ToArray());
+        Assert.Contains(typeof(RoutedValue), fallbackTypes);
+    }
+
+    /// <summary>
+    /// Ensures that the non-generic ref TWriteBuffer entry point, which forwards to the generic one, routes a downlevel-only
+    /// formatter's value too.
+    /// </summary>
+    [Fact]
+    public void NonGenericRefBufferEntryRoutesToo()
+    {
+        var options = MakeOptions(out _);
+        var value = new RoutedValue { X = -99 };
+
+        var writer = new ArrayBufferWriter<byte>();
+        var buffer = new BufferWriterWriteBuffer(writer);
+        MessagePackSerializer.Serialize(typeof(RoutedValue), ref buffer, value, options);
+        buffer.Flush();
+
+        Assert.Equal(MessagePackSerializer.Serialize(value, options), writer.WrittenSpan.ToArray());
+    }
+
+    /// <summary>
+    /// Ensures that the routed value is appended at the caller's current position: bytes the caller wrote before and after it
+    /// stay in place, as when MessagePack is embedded inside another protocol.
+    /// </summary>
+    [Fact]
+    public void RefBufferEntryAppendsRoutedValueInPlace()
+    {
+        var options = MakeOptions(out _);
+        var value = new List<RoutedValue> { new() { X = 1 }, new() { X = 70000 } };
+
+        var writer = new ArrayBufferWriter<byte>();
+        var buffer = new BufferWriterWriteBuffer(writer);
+        buffer.WriteArrayHeader(3);
+        buffer.WriteNil();
+        MessagePackSerializer.Serialize(ref buffer, value, options);
+        buffer.WriteBoolean(true);
+        buffer.Flush();
+
+        byte[] expected = [0x93, 0xc0, .. MessagePackSerializer.Serialize(value, options), 0xc3];
+        Assert.Equal(expected, writer.WrittenSpan.ToArray());
+    }
+
+    /// <summary>
+    /// Ensures that ThrowOnLegacyFormatter still turns the reroute into an error on the ref TWriteBuffer entry point.
+    /// </summary>
+    [Fact]
+    public void ThrowOnLegacyFormatterRestoresTheThrowOnRefBufferEntry()
+    {
+        var options = MakeOptions(out var fallbackTypes, throwOnLegacyFormatter: true);
+
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+        {
+            var buffer = new BufferWriterWriteBuffer(new ArrayBufferWriter<byte>());
+            MessagePackSerializer.Serialize(ref buffer, new RoutedValue { X = 1 }, options);
+        });
+        Assert.Contains("net9.0", ex.Message);
+        Assert.Empty(fallbackTypes);
+    }
 #endif
 }
